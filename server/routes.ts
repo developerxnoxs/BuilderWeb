@@ -10,6 +10,7 @@ import {
 } from "@shared/schema";
 import { z } from "zod";
 import { debianBuildService, type DebianServerConfig } from "./debian-build-service";
+import { buildQueue } from "./build-queue";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
@@ -260,29 +261,56 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
-      await storage.updateProject(req.params.id, { status: "building" });
-
       const build = await storage.createBuildJob({
         projectId: req.params.id,
         status: "queued",
-        logs: [],
+        logs: [
+          { timestamp: new Date().toISOString(), level: "info", message: "Build queued" }
+        ] as any,
         buildConfig: req.body.config || {},
       });
 
-      const projectFiles = await storage.getProjectFiles(req.params.id);
-      const files = projectFiles.map(f => ({
-        path: f.path,
-        content: f.content
-      }));
+      buildQueue.add(build.id, req.params.id, req.body.priority || 0);
 
-      (async () => {
+      const processBuild = async () => {
         try {
-          await storage.updateBuildJob(build.id, {
+          if (!buildQueue.canStartBuild()) {
+            const queuePos = buildQueue.getPosition(build.id);
+            await storage.updateBuildJob(build.id, {
+              logs: [
+                { timestamp: new Date().toISOString(), level: "info", message: `Build queued (position: ${queuePos + 1})` }
+              ] as any
+            });
+            const updatedBuild = await storage.getBuildJob(build.id);
+            if (updatedBuild) {
+              broadcastBuildUpdate(build.id, req.params.id, updatedBuild);
+            }
+            
+            setTimeout(processBuild, 5000);
+            return;
+          }
+
+          if (!buildQueue.startBuild(build.id)) {
+            return;
+          }
+
+          await storage.updateProject(req.params.id, { status: "building" });
+
+          const projectFiles = await storage.getProjectFiles(req.params.id);
+          const files = projectFiles.map(f => ({
+            path: f.path,
+            content: f.content
+          }));
+
+          const updatedBuild1 = await storage.updateBuildJob(build.id, {
             status: "queued",
             logs: [
               { timestamp: new Date().toISOString(), level: "info", message: "Submitting build to Debian server..." }
             ] as any
           });
+          if (updatedBuild1) {
+            broadcastBuildUpdate(build.id, req.params.id, updatedBuild1);
+          }
 
           const debianBuildId = await debianBuildService.submitBuild({
             projectId: project.id,
@@ -292,7 +320,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             buildConfig: req.body.config || {}
           });
 
-          await storage.updateBuildJob(build.id, {
+          const updatedBuild2 = await storage.updateBuildJob(build.id, {
             status: "building",
             logs: [
               { timestamp: new Date().toISOString(), level: "info", message: "Build submitted successfully" },
@@ -300,16 +328,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
               { timestamp: new Date().toISOString(), level: "info", message: "Waiting for build to start..." }
             ] as any
           });
+          if (updatedBuild2) {
+            broadcastBuildUpdate(build.id, req.params.id, updatedBuild2);
+          }
 
           const finalStatus = await debianBuildService.pollBuildStatus(
             debianBuildId,
             async (status) => {
-              const updatedBuild = await storage.updateBuildJob(build.id, {
+              const updateData: any = {
                 status: status.status,
-                logs: status.logs as any,
-                apkUrl: status.apkUrl,
-                errorMessage: status.errorMessage
-              });
+              };
+              
+              if (status.logs && status.logs.length > 0) {
+                updateData.logs = status.logs;
+              }
+              
+              if (status.apkUrl) {
+                updateData.apkUrl = status.apkUrl;
+              }
+              
+              if (status.errorMessage) {
+                updateData.errorMessage = status.errorMessage;
+              }
+
+              const updatedBuild = await storage.updateBuildJob(build.id, updateData);
               
               if (updatedBuild) {
                 broadcastBuildUpdate(build.id, req.params.id, updatedBuild);
@@ -317,18 +359,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
             }
           );
 
-          await storage.updateBuildJob(build.id, {
+          const finalUpdateData: any = {
             status: finalStatus.status,
             completedAt: new Date(),
-            logs: finalStatus.logs as any,
-            apkUrl: finalStatus.apkUrl,
-            errorMessage: finalStatus.errorMessage
-          });
+          };
+          
+          if (finalStatus.logs && finalStatus.logs.length > 0) {
+            finalUpdateData.logs = finalStatus.logs;
+          }
+          
+          if (finalStatus.apkUrl) {
+            finalUpdateData.apkUrl = finalStatus.apkUrl;
+          }
+          
+          if (finalStatus.errorMessage) {
+            finalUpdateData.errorMessage = finalStatus.errorMessage;
+          }
 
+          const completedBuild = await storage.updateBuildJob(build.id, finalUpdateData);
           await storage.updateProject(req.params.id, { status: "active" });
+          
+          if (completedBuild) {
+            broadcastBuildUpdate(build.id, req.params.id, completedBuild);
+          }
+
+          buildQueue.completeBuild(build.id);
 
         } catch (error) {
-          await storage.updateBuildJob(build.id, {
+          const failedBuild = await storage.updateBuildJob(build.id, {
             status: "failed",
             completedAt: new Date(),
             errorMessage: error instanceof Error ? error.message : "Build failed",
@@ -338,13 +396,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
             ] as any
           });
           await storage.updateProject(req.params.id, { status: "active" });
+          
+          if (failedBuild) {
+            broadcastBuildUpdate(build.id, req.params.id, failedBuild);
+          }
+
+          buildQueue.completeBuild(build.id);
         }
-      })();
+      };
+
+      processBuild();
 
       res.status(201).json(build);
     } catch (error) {
-      await storage.updateProject(req.params.id, { status: "active" });
       res.status(500).json({ error: "Failed to start build" });
+    }
+  });
+
+  // Build Queue Status
+  app.get("/api/queue/status", async (req, res) => {
+    try {
+      res.json(buildQueue.getQueueStatus());
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get queue status" });
     }
   });
 
