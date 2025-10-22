@@ -12,6 +12,7 @@ import { z } from "zod";
 import { debianBuildService, type DebianServerConfig } from "./debian-build-service";
 import { buildQueue } from "./build-queue";
 import { gitService } from "./git-service";
+import { realGitService } from "./real-git-service";
 import multer from "multer";
 import archiver from "archiver";
 import { createWriteStream, createReadStream } from "fs";
@@ -683,13 +684,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ error: "Project not found" });
       }
 
-      const commits = await storage.getProjectCommits(req.params.id);
-      const files = await storage.getProjectFiles(req.params.id);
-      
-      const uncommittedChanges = files.length;
-      const status = gitService.generateGitStatus(commits, uncommittedChanges);
-      
-      res.json(status);
+      try {
+        const files = await storage.getProjectFiles(req.params.id);
+        await realGitService.syncFiles(req.params.id, files);
+        
+        const status = await realGitService.getStatus(req.params.id);
+        const commits = await realGitService.getCommitHistory(req.params.id);
+        
+        res.json({
+          initialized: commits.length > 0,
+          currentBranch: status.branch,
+          uncommittedChanges: status.staged.length + status.unstaged.length + status.untracked.length,
+          totalCommits: commits.length,
+          staged: status.staged,
+          unstaged: status.unstaged,
+          untracked: status.untracked,
+        });
+      } catch (error) {
+        const commits = await storage.getProjectCommits(req.params.id);
+        const files = await storage.getProjectFiles(req.params.id);
+        const uncommittedChanges = files.length;
+        const status = gitService.generateGitStatus(commits, uncommittedChanges);
+        res.json(status);
+      }
     } catch (error) {
       res.status(500).json({ error: "Failed to get git status" });
     }
@@ -698,11 +715,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/projects/:id/git/commits", async (req, res) => {
     try {
       const { branch } = req.query;
-      const commits = await storage.getProjectCommits(
-        req.params.id,
-        typeof branch === 'string' ? branch : undefined
-      );
-      res.json(commits);
+      
+      try {
+        const commits = await realGitService.getCommitHistory(
+          req.params.id,
+          typeof branch === 'string' ? branch : undefined
+        );
+        
+        const formattedCommits = commits.map(c => ({
+          id: c.hash,
+          commitHash: c.hash,
+          message: c.message,
+          author: c.author,
+          email: c.email,
+          branch: typeof branch === 'string' ? branch : 'main',
+          filesChanged: c.filesChanged,
+          createdAt: c.date,
+        }));
+        
+        res.json(formattedCommits);
+      } catch (error) {
+        const commits = await storage.getProjectCommits(
+          req.params.id,
+          typeof branch === 'string' ? branch : undefined
+        );
+        res.json(commits);
+      }
     } catch (error) {
       res.status(500).json({ error: "Failed to fetch commits" });
     }
@@ -724,23 +762,47 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
 
-      const files = await storage.getProjectFiles(req.params.id);
-      const filesChanged = files.map(f => ({
-        path: f.path,
-        type: f.type,
-      }));
+      try {
+        const files = await storage.getProjectFiles(req.params.id);
+        await realGitService.syncFiles(req.params.id, files);
+        
+        const commitInfo = await realGitService.commit(
+          req.params.id,
+          message,
+          author || 'Anonymous',
+          email
+        );
 
-      const commitData = gitService.createCommit({
-        projectId: req.params.id,
-        message,
-        author: author || 'Anonymous',
-        email,
-        branch,
-        filesChanged,
-      });
+        const commit = await storage.createGitCommit({
+          projectId: req.params.id,
+          commitHash: commitInfo.hash,
+          message: commitInfo.message,
+          author: commitInfo.author,
+          email: commitInfo.email,
+          branch: branch || 'main',
+          filesChanged: commitInfo.filesChanged as any,
+        });
 
-      const commit = await storage.createGitCommit(commitData);
-      res.status(201).json(commit);
+        res.status(201).json(commit);
+      } catch (gitError: any) {
+        const files = await storage.getProjectFiles(req.params.id);
+        const filesChanged = files.map(f => ({
+          path: f.path,
+          type: f.type,
+        }));
+
+        const commitData = gitService.createCommit({
+          projectId: req.params.id,
+          message,
+          author: author || 'Anonymous',
+          email,
+          branch,
+          filesChanged,
+        });
+
+        const commit = await storage.createGitCommit(commitData);
+        res.status(201).json(commit);
+      }
     } catch (error) {
       res.status(500).json({ error: "Failed to create commit" });
     }
@@ -748,8 +810,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get("/api/projects/:id/git/branches", async (req, res) => {
     try {
-      const branches = await storage.getProjectBranches(req.params.id);
-      res.json(branches.length > 0 ? branches : ['main']);
+      try {
+        const branches = await realGitService.getBranches(req.params.id);
+        res.json(branches.length > 0 ? branches : ['main']);
+      } catch (error) {
+        const branches = await storage.getProjectBranches(req.params.id);
+        res.json(branches.length > 0 ? branches : ['main']);
+      }
     } catch (error) {
       res.status(500).json({ error: "Failed to fetch branches" });
     }
@@ -760,23 +827,44 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { branch, limit } = req.query;
       const limitNum = limit ? parseInt(limit as string, 10) : 50;
       
-      const commits = await storage.getProjectCommits(
-        req.params.id,
-        typeof branch === 'string' ? branch : undefined
-      );
-      
-      const history = commits.slice(0, limitNum).map(commit => ({
-        id: commit.id,
-        commitHash: commit.commitHash,
-        message: commit.message,
-        author: commit.author,
-        email: commit.email,
-        branch: commit.branch,
-        filesChanged: commit.filesChanged,
-        createdAt: commit.createdAt,
-      }));
-      
-      res.json(history);
+      try {
+        const commits = await realGitService.getCommitHistory(
+          req.params.id,
+          typeof branch === 'string' ? branch : undefined,
+          limitNum
+        );
+        
+        const history = commits.map(commit => ({
+          id: commit.hash,
+          commitHash: commit.hash,
+          message: commit.message,
+          author: commit.author,
+          email: commit.email,
+          branch: typeof branch === 'string' ? branch : 'main',
+          filesChanged: commit.filesChanged,
+          createdAt: commit.date,
+        }));
+        
+        res.json(history);
+      } catch (error) {
+        const commits = await storage.getProjectCommits(
+          req.params.id,
+          typeof branch === 'string' ? branch : undefined
+        );
+        
+        const history = commits.slice(0, limitNum).map(commit => ({
+          id: commit.id,
+          commitHash: commit.commitHash,
+          message: commit.message,
+          author: commit.author,
+          email: commit.email,
+          branch: commit.branch,
+          filesChanged: commit.filesChanged,
+          createdAt: commit.createdAt,
+        }));
+        
+        res.json(history);
+      }
     } catch (error) {
       res.status(500).json({ error: "Failed to fetch git history" });
     }
@@ -790,14 +878,76 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Cannot delete main branch" });
       }
 
-      const deleted = await storage.deleteProjectCommits(req.params.id, branch);
-      if (!deleted) {
-        return res.status(404).json({ error: "Branch not found" });
+      try {
+        await realGitService.deleteBranch(req.params.id, branch);
+        await storage.deleteProjectCommits(req.params.id, branch);
+        res.status(204).send();
+      } catch (error) {
+        const deleted = await storage.deleteProjectCommits(req.params.id, branch);
+        if (!deleted) {
+          return res.status(404).json({ error: "Branch not found" });
+        }
+        res.status(204).send();
       }
-      
-      res.status(204).send();
     } catch (error) {
       res.status(500).json({ error: "Failed to delete branch" });
+    }
+  });
+
+  app.post("/api/projects/:id/git/init", async (req, res) => {
+    try {
+      const files = await storage.getProjectFiles(req.params.id);
+      await realGitService.initializeRepository(req.params.id, files);
+      
+      res.json({ success: true, message: "Repository initialized" });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to initialize repository" });
+    }
+  });
+
+  app.get("/api/projects/:id/git/diff", async (req, res) => {
+    try {
+      const { filePath } = req.query;
+      
+      const diff = await realGitService.getDiff(
+        req.params.id,
+        typeof filePath === 'string' ? filePath : undefined
+      );
+      
+      res.json({ diff });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get diff" });
+    }
+  });
+
+  app.post("/api/projects/:id/git/branches", async (req, res) => {
+    try {
+      const { name } = req.body;
+      
+      const validation = gitService.validateBranchName(name);
+      if (!validation.valid) {
+        return res.status(400).json({ error: validation.error });
+      }
+
+      await realGitService.createBranch(req.params.id, name);
+      res.status(201).json({ success: true, branch: name });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to create branch" });
+    }
+  });
+
+  app.post("/api/projects/:id/git/checkout", async (req, res) => {
+    try {
+      const { branch } = req.body;
+      
+      if (!branch) {
+        return res.status(400).json({ error: "Branch name is required" });
+      }
+
+      await realGitService.checkoutBranch(req.params.id, branch);
+      res.json({ success: true, currentBranch: branch });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to checkout branch" });
     }
   });
 
