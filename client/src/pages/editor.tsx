@@ -6,6 +6,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { CodeEditor } from "@/components/code-editor";
 import { FileTree } from "@/components/file-tree";
 import { BuildStatusPanel } from "@/components/build-status-panel";
+import { GitPanel } from "@/components/git-panel";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { 
@@ -16,7 +17,8 @@ import {
   X,
   ChevronLeft,
   ChevronRight,
-  Hammer
+  Hammer,
+  GitBranch
 } from "lucide-react";
 import { Project, FileTreeNode, BuildJob } from "@shared/schema";
 import { useToast } from "@/hooks/use-toast";
@@ -45,6 +47,7 @@ export default function Editor() {
   const [activeTab, setActiveTab] = useState<string | null>(null);
   const [fileTreeCollapsed, setFileTreeCollapsed] = useState(false);
   const [buildPanelCollapsed, setBuildPanelCollapsed] = useState(false);
+  const [rightPanelTab, setRightPanelTab] = useState<"build" | "git">("build");
 
   const { data: project } = useQuery<Project>({
     queryKey: ["/api/projects", projectId],
@@ -363,16 +366,37 @@ export default function Editor() {
             </div>
           </ResizablePanel>
 
-          {/* Build Panel */}
+          {/* Right Panel (Build & Git) */}
           {!buildPanelCollapsed && (
             <>
               <ResizableHandle />
               <ResizablePanel defaultSize={30} minSize={25} maxSize={40}>
-                <div className="h-full p-4 bg-card/30">
-                  <BuildStatusPanel
-                    buildJob={currentBuild}
-                    onDownloadApk={(url) => window.open(url, "_blank")}
-                  />
+                <div className="h-full bg-card/30">
+                  <Tabs value={rightPanelTab} onValueChange={(v) => setRightPanelTab(v as "build" | "git")} className="h-full flex flex-col">
+                    <div className="border-b border-border px-2 py-1 bg-card/50">
+                      <TabsList className="w-full justify-start">
+                        <TabsTrigger value="build" className="flex items-center gap-2">
+                          <Hammer className="h-4 w-4" />
+                          Build
+                        </TabsTrigger>
+                        <TabsTrigger value="git" className="flex items-center gap-2">
+                          <GitBranch className="h-4 w-4" />
+                          Git
+                        </TabsTrigger>
+                      </TabsList>
+                    </div>
+                    
+                    <TabsContent value="build" className="flex-1 p-4 m-0 overflow-auto">
+                      <BuildStatusPanel
+                        buildJob={currentBuild}
+                        onDownloadApk={(url) => window.open(url, "_blank")}
+                      />
+                    </TabsContent>
+                    
+                    <TabsContent value="git" className="flex-1 p-4 m-0 overflow-auto">
+                      {projectId && <GitPanel projectId={projectId} />}
+                    </TabsContent>
+                  </Tabs>
                 </div>
               </ResizablePanel>
             </>

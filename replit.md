@@ -73,16 +73,39 @@ A powerful web-based IDE for building real Android applications using React Nati
 ✅ Monaco code editor with syntax highlighting
 ✅ File tree explorer with expand/collapse
 ✅ Multi-tab file editing
-✅ Project dashboard with statistics
+✅ Project dashboard with real statistics
 ✅ Template system for quick project creation
 ✅ Build status panel with real-time logs
 ✅ Dark/Light theme support
 ✅ Responsive design
 ✅ Settings for server configuration
 
+**Git Integration:**
+✅ Commit tracking with author and message
+✅ Git history and branch management
+✅ Git status and uncommitted changes tracking
+
+**Project Management:**
+✅ Project duplication
+✅ Project export as ZIP
+✅ Project import from ZIP
+✅ Project-specific build settings
+✅ Advanced search and filtering
+
+**File Operations:**
+✅ File rename/move functionality
+✅ File upload for assets (images, fonts, audio)
+✅ Batch file operations (create/delete multiple)
+✅ Search within file contents
+
+**Build Features:**
+✅ Build cancellation
+✅ Real-time WebSocket build updates
+✅ Build queue management
+✅ APK download
+
 ### Future Enhancements
-- Real WebSocket integration for live build logs
-- GitHub integration for version control
+- GitHub remote push/pull integration
 - Visual UI builder (drag-and-drop)
 - AI code assistant
 - Collaborative editing

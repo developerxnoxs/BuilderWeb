@@ -8,11 +8,25 @@ import { Plus, Search, Rocket, Code2, Zap } from "lucide-react";
 import { Project } from "@shared/schema";
 import { Skeleton } from "@/components/ui/skeleton";
 
+interface DashboardStats {
+  totalProjects: number;
+  activeBuilds: number;
+  successfulBuilds: number;
+  failedBuilds: number;
+  totalBuilds: number;
+  frameworkCounts: Record<string, number>;
+  successRate: string;
+}
+
 export default function Dashboard() {
   const [searchQuery, setSearchQuery] = useState("");
 
   const { data: projects = [], isLoading, isError } = useQuery<Project[]>({
     queryKey: ["/api/projects"],
+  });
+
+  const { data: stats, isLoading: isStatsLoading } = useQuery<DashboardStats>({
+    queryKey: ["/api/dashboard/stats"],
   });
 
   const filteredProjects = projects.filter((project) =>
@@ -71,7 +85,7 @@ export default function Dashboard() {
               <div>
                 <p className="text-sm text-muted-foreground">Total Projects</p>
                 <p className="text-2xl font-bold mt-1" data-testid="text-total-projects">
-                  {isLoading ? "..." : projects.length}
+                  {isStatsLoading ? "..." : stats?.totalProjects ?? 0}
                 </p>
               </div>
               <div className="w-12 h-12 bg-primary/10 rounded-lg flex items-center justify-center">
@@ -84,7 +98,7 @@ export default function Dashboard() {
               <div>
                 <p className="text-sm text-muted-foreground">Active Builds</p>
                 <p className="text-2xl font-bold mt-1" data-testid="text-active-builds">
-                  {isLoading ? "..." : projects.filter(p => p.status === "building").length}
+                  {isStatsLoading ? "..." : stats?.activeBuilds ?? 0}
                 </p>
               </div>
               <div className="w-12 h-12 bg-chart-3/10 rounded-lg flex items-center justify-center">
@@ -96,7 +110,9 @@ export default function Dashboard() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground">Successful Builds</p>
-                <p className="text-2xl font-bold mt-1" data-testid="text-successful-builds">0</p>
+                <p className="text-2xl font-bold mt-1" data-testid="text-successful-builds">
+                  {isStatsLoading ? "..." : stats?.successfulBuilds ?? 0}
+                </p>
               </div>
               <div className="w-12 h-12 bg-chart-2/10 rounded-lg flex items-center justify-center">
                 <Rocket className="h-6 w-6 text-chart-2" />

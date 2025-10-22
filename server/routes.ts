@@ -11,9 +11,35 @@ import {
 import { z } from "zod";
 import { debianBuildService, type DebianServerConfig } from "./debian-build-service";
 import { buildQueue } from "./build-queue";
+import { gitService } from "./git-service";
+import multer from "multer";
+import archiver from "archiver";
+import { createWriteStream, createReadStream } from "fs";
+import { mkdir, unlink, rm } from "fs/promises";
+import { join } from "path";
+import unzipper from "unzipper";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
+
+  // Configure multer for file uploads
+  const upload = multer({
+    dest: 'uploads/',
+    limits: {
+      fileSize: 10 * 1024 * 1024, // 10MB max
+    },
+    fileFilter: (_req, file, cb) => {
+      const allowedTypes = /jpeg|jpg|png|gif|svg|webp|ttf|otf|woff|woff2|mp3|wav|json|xml/;
+      const extname = allowedTypes.test(file.originalname.toLowerCase());
+      const mimetype = allowedTypes.test(file.mimetype);
+      
+      if (mimetype && extname) {
+        return cb(null, true);
+      } else {
+        cb(new Error('Invalid file type. Only images, fonts, audio, and config files allowed.'));
+      }
+    }
+  });
 
   // WebSocket server for real-time build logs
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
@@ -478,6 +504,155 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Dashboard Statistics
+  app.get("/api/dashboard/stats", async (req, res) => {
+    try {
+      const projects = await storage.getAllProjects();
+      const builds = await storage.getAllBuilds();
+      
+      const totalProjects = projects.length;
+      const activeBuilds = builds.filter(b => b.status === 'building' || b.status === 'queued').length;
+      const successfulBuilds = builds.filter(b => b.status === 'success').length;
+      const failedBuilds = builds.filter(b => b.status === 'failed').length;
+      const totalBuilds = builds.length;
+      
+      const frameworkCounts = projects.reduce((acc, p) => {
+        acc[p.framework] = (acc[p.framework] || 0) + 1;
+        return acc;
+      }, {} as Record<string, number>);
+
+      res.json({
+        totalProjects,
+        activeBuilds,
+        successfulBuilds,
+        failedBuilds,
+        totalBuilds,
+        frameworkCounts,
+        successRate: totalBuilds > 0 ? (successfulBuilds / totalBuilds * 100).toFixed(1) : "0",
+      });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch dashboard statistics" });
+    }
+  });
+
+  // Project Duplication
+  app.post("/api/projects/:id/duplicate", async (req, res) => {
+    try {
+      const sourceProject = await storage.getProject(req.params.id);
+      if (!sourceProject) {
+        return res.status(404).json({ error: "Project not found" });
+      }
+
+      const newName = req.body.name || `${sourceProject.name} (Copy)`;
+      
+      const newProject = await storage.createProject({
+        name: newName,
+        description: sourceProject.description,
+        framework: sourceProject.framework,
+        status: "active",
+      });
+
+      const sourceFiles = await storage.getProjectFiles(req.params.id);
+      for (const file of sourceFiles) {
+        await storage.createFile({
+          projectId: newProject.id,
+          path: file.path,
+          content: file.content,
+          type: file.type,
+          language: file.language,
+        });
+      }
+
+      res.status(201).json(newProject);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to duplicate project" });
+    }
+  });
+
+  // File Rename/Move
+  app.put("/api/projects/:id/files/rename", async (req, res) => {
+    try {
+      const { oldPath, newPath } = req.body;
+      
+      if (!oldPath || !newPath) {
+        return res.status(400).json({ error: "Both oldPath and newPath are required" });
+      }
+
+      const file = await storage.renameFile(req.params.id, oldPath, newPath);
+      if (!file) {
+        return res.status(404).json({ error: "File not found" });
+      }
+      
+      res.json(file);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to rename file" });
+    }
+  });
+
+  // Build Cancellation
+  app.post("/api/builds/:id/cancel", async (req, res) => {
+    try {
+      const build = await storage.getBuildJob(req.params.id);
+      if (!build) {
+        return res.status(404).json({ error: "Build not found" });
+      }
+
+      if (build.status !== 'queued' && build.status !== 'building') {
+        return res.status(400).json({ error: "Can only cancel queued or building builds" });
+      }
+
+      buildQueue.remove(req.params.id);
+
+      const updatedBuild = await storage.updateBuildJob(req.params.id, {
+        status: "failed",
+        completedAt: new Date(),
+        errorMessage: "Build cancelled by user",
+        logs: [
+          ...(build.logs as BuildLogEntry[] || []),
+          { timestamp: new Date().toISOString(), level: "warn", message: "Build cancelled by user" }
+        ] as any
+      });
+
+      if (build.projectId) {
+        await storage.updateProject(build.projectId, { status: "active" });
+        if (updatedBuild) {
+          broadcastBuildUpdate(req.params.id, build.projectId, updatedBuild);
+        }
+      }
+
+      res.json(updatedBuild);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to cancel build" });
+    }
+  });
+
+  // Advanced Project Search/Filter
+  app.get("/api/projects/search", async (req, res) => {
+    try {
+      const { query, framework, status } = req.query;
+      let projects = await storage.getAllProjects();
+
+      if (query && typeof query === 'string') {
+        projects = projects.filter(p => 
+          p.name.toLowerCase().includes(query.toLowerCase()) ||
+          (p.description && p.description.toLowerCase().includes(query.toLowerCase()))
+        );
+      }
+
+      if (framework && typeof framework === 'string') {
+        projects = projects.filter(p => p.framework === framework);
+      }
+
+      if (status && typeof status === 'string') {
+        projects = projects.filter(p => p.status === status);
+      }
+
+      res.json(projects);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to search projects" });
+    }
+  });
+
   // Templates
   app.get("/api/templates", async (req, res) => {
     try {
@@ -497,6 +672,385 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(template);
     } catch (error) {
       res.status(500).json({ error: "Failed to fetch template" });
+    }
+  });
+
+  // Git Operations
+  app.get("/api/projects/:id/git/status", async (req, res) => {
+    try {
+      const project = await storage.getProject(req.params.id);
+      if (!project) {
+        return res.status(404).json({ error: "Project not found" });
+      }
+
+      const commits = await storage.getProjectCommits(req.params.id);
+      const files = await storage.getProjectFiles(req.params.id);
+      
+      const uncommittedChanges = files.length;
+      const status = gitService.generateGitStatus(commits, uncommittedChanges);
+      
+      res.json(status);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get git status" });
+    }
+  });
+
+  app.get("/api/projects/:id/git/commits", async (req, res) => {
+    try {
+      const { branch } = req.query;
+      const commits = await storage.getProjectCommits(
+        req.params.id,
+        typeof branch === 'string' ? branch : undefined
+      );
+      res.json(commits);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch commits" });
+    }
+  });
+
+  app.post("/api/projects/:id/git/commit", async (req, res) => {
+    try {
+      const { message, author, email, branch } = req.body;
+      
+      const validation = gitService.validateCommitMessage(message);
+      if (!validation.valid) {
+        return res.status(400).json({ error: validation.error });
+      }
+
+      if (branch) {
+        const branchValidation = gitService.validateBranchName(branch);
+        if (!branchValidation.valid) {
+          return res.status(400).json({ error: branchValidation.error });
+        }
+      }
+
+      const files = await storage.getProjectFiles(req.params.id);
+      const filesChanged = files.map(f => ({
+        path: f.path,
+        type: f.type,
+      }));
+
+      const commitData = gitService.createCommit({
+        projectId: req.params.id,
+        message,
+        author: author || 'Anonymous',
+        email,
+        branch,
+        filesChanged,
+      });
+
+      const commit = await storage.createGitCommit(commitData);
+      res.status(201).json(commit);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to create commit" });
+    }
+  });
+
+  app.get("/api/projects/:id/git/branches", async (req, res) => {
+    try {
+      const branches = await storage.getProjectBranches(req.params.id);
+      res.json(branches.length > 0 ? branches : ['main']);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch branches" });
+    }
+  });
+
+  app.get("/api/projects/:id/git/history", async (req, res) => {
+    try {
+      const { branch, limit } = req.query;
+      const limitNum = limit ? parseInt(limit as string, 10) : 50;
+      
+      const commits = await storage.getProjectCommits(
+        req.params.id,
+        typeof branch === 'string' ? branch : undefined
+      );
+      
+      const history = commits.slice(0, limitNum).map(commit => ({
+        id: commit.id,
+        commitHash: commit.commitHash,
+        message: commit.message,
+        author: commit.author,
+        email: commit.email,
+        branch: commit.branch,
+        filesChanged: commit.filesChanged,
+        createdAt: commit.createdAt,
+      }));
+      
+      res.json(history);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch git history" });
+    }
+  });
+
+  app.delete("/api/projects/:id/git/branches/:branch", async (req, res) => {
+    try {
+      const { branch } = req.params;
+      
+      if (branch === 'main' || branch === 'master') {
+        return res.status(400).json({ error: "Cannot delete main branch" });
+      }
+
+      const deleted = await storage.deleteProjectCommits(req.params.id, branch);
+      if (!deleted) {
+        return res.status(404).json({ error: "Branch not found" });
+      }
+      
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Failed to delete branch" });
+    }
+  });
+
+  // File Upload
+  app.post("/api/projects/:id/upload", upload.single('file'), async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+
+      const { path: filePath } = req.body;
+      const fs = await import('fs/promises');
+      
+      const fileContent = await fs.readFile(req.file.path, 'base64');
+      
+      const file = await storage.createFile({
+        projectId: req.params.id,
+        path: filePath || `assets/${req.file.originalname}`,
+        content: fileContent,
+        type: 'file',
+        language: req.file.mimetype.startsWith('image/') ? 'image' : 'asset'
+      });
+
+      await unlink(req.file.path).catch(() => {});
+      
+      res.status(201).json(file);
+    } catch (error) {
+      if (req.file?.path) {
+        await unlink(req.file.path).catch(() => {});
+      }
+      res.status(500).json({ error: "Failed to upload file" });
+    }
+  });
+
+  // Project Export
+  app.get("/api/projects/:id/export", async (req, res) => {
+    try {
+      const project = await storage.getProject(req.params.id);
+      if (!project) {
+        return res.status(404).json({ error: "Project not found" });
+      }
+
+      const files = await storage.getProjectFiles(req.params.id);
+      const exportDir = join('exports', project.id + '-' + Date.now());
+      
+      await mkdir('exports', { recursive: true });
+      await mkdir(exportDir, { recursive: true });
+      
+      const archive = archiver('zip', { zlib: { level: 9 } });
+      const outputPath = join(exportDir, `${project.name.replace(/\s+/g, '-')}.zip`);
+      const output = createWriteStream(outputPath);
+
+      output.on('close', async () => {
+        res.download(outputPath, `${project.name}.zip`, async (err) => {
+          if (err) console.error('Download error:', err);
+          await rm(exportDir, { recursive: true, force: true });
+        });
+      });
+
+      archive.on('error', (err) => {
+        throw err;
+      });
+
+      archive.pipe(output);
+      
+      archive.append(JSON.stringify(project, null, 2), { name: 'project.json' });
+      
+      for (const file of files) {
+        if (file.type === 'file') {
+          archive.append(file.content, { name: file.path });
+        }
+      }
+
+      await archive.finalize();
+    } catch (error) {
+      res.status(500).json({ error: "Failed to export project" });
+    }
+  });
+
+  // Project Import
+  app.post("/api/projects/import", upload.single('file'), async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+
+      await mkdir('uploads', { recursive: true });
+      const extractDir = join('uploads', 'extract-' + Date.now());
+      await mkdir(extractDir, { recursive: true });
+
+      const fs = await import('fs');
+      await fs.createReadStream(req.file.path)
+        .pipe(unzipper.Extract({ path: extractDir }))
+        .promise();
+
+      const projectDataPath = join(extractDir, 'project.json');
+      const projectData = JSON.parse(await import('fs/promises').then(fs => 
+        fs.readFile(projectDataPath, 'utf-8')
+      ));
+
+      const newProject = await storage.createProject({
+        name: req.body.name || projectData.name + ' (Imported)',
+        description: projectData.description,
+        framework: projectData.framework,
+        status: 'active',
+      });
+
+      const fsPromises = await import('fs/promises');
+      const files = await fsPromises.readdir(extractDir);
+      
+      for (const fileName of files) {
+        if (fileName === 'project.json') continue;
+        
+        const filePath = join(extractDir, fileName);
+        const content = await fsPromises.readFile(filePath, 'utf-8');
+        
+        await storage.createFile({
+          projectId: newProject.id,
+          path: fileName,
+          content,
+          type: 'file',
+          language: 'javascript'
+        });
+      }
+
+      await rm(extractDir, { recursive: true, force: true }).catch(() => {});
+      await unlink(req.file.path).catch(() => {});
+
+      res.status(201).json(newProject);
+    } catch (error) {
+      if (req.file?.path) {
+        await unlink(req.file.path).catch(() => {});
+      }
+      res.status(500).json({ error: "Failed to import project" });
+    }
+  });
+
+  // Project Settings
+  app.get("/api/projects/:id/settings", async (req, res) => {
+    try {
+      const project = await storage.getProject(req.params.id);
+      if (!project) {
+        return res.status(404).json({ error: "Project not found" });
+      }
+      res.json(project.settings || {});
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get project settings" });
+    }
+  });
+
+  app.put("/api/projects/:id/settings", async (req, res) => {
+    try {
+      const project = await storage.updateProject(req.params.id, {
+        settings: req.body as any
+      });
+      
+      if (!project) {
+        return res.status(404).json({ error: "Project not found" });
+      }
+      
+      res.json(project.settings);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to update project settings" });
+    }
+  });
+
+  // Search in Files
+  app.get("/api/projects/:id/search", async (req, res) => {
+    try {
+      const { query, caseSensitive } = req.query;
+      
+      if (!query || typeof query !== 'string') {
+        return res.status(400).json({ error: "Search query is required" });
+      }
+
+      const files = await storage.getProjectFiles(req.params.id);
+      const results: any[] = [];
+
+      const searchRegex = new RegExp(
+        query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+        caseSensitive === 'true' ? 'g' : 'gi'
+      );
+
+      for (const file of files) {
+        if (file.type !== 'file') continue;
+
+        const lines = file.content.split('\n');
+        lines.forEach((line, index) => {
+          const matches = Array.from(line.matchAll(searchRegex));
+          matches.forEach(match => {
+            if (match.index !== undefined) {
+              results.push({
+                fileId: file.id,
+                filePath: file.path,
+                lineNumber: index + 1,
+                lineContent: line,
+                matchStart: match.index,
+                matchEnd: match.index + match[0].length,
+              });
+            }
+          });
+        });
+      }
+
+      res.json({
+        query,
+        totalResults: results.length,
+        results: results.slice(0, 100)
+      });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to search files" });
+    }
+  });
+
+  // Batch File Operations
+  app.post("/api/projects/:id/files/batch", async (req, res) => {
+    try {
+      const { operation, files } = req.body;
+      
+      if (!operation || !Array.isArray(files)) {
+        return res.status(400).json({ error: "Invalid batch operation" });
+      }
+
+      const results = [];
+
+      switch (operation) {
+        case 'create':
+          for (const fileData of files) {
+            const file = await storage.createFile({
+              projectId: req.params.id,
+              ...fileData
+            });
+            results.push(file);
+          }
+          break;
+
+        case 'delete':
+          for (const filePath of files) {
+            await storage.deleteFile(req.params.id, filePath);
+          }
+          break;
+
+        default:
+          return res.status(400).json({ error: "Unsupported operation" });
+      }
+
+      res.json({
+        operation,
+        count: results.length,
+        results
+      });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to execute batch operation" });
     }
   });
 

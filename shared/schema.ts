@@ -9,6 +9,7 @@ export const projects = pgTable("projects", {
   description: text("description"),
   framework: text("framework").notNull(), // 'react-native' | 'flutter' | 'capacitor'
   status: text("status").notNull().default("active"), // 'active' | 'building' | 'archived'
+  settings: jsonb("settings"), // project-specific build settings
   createdAt: timestamp("created_at").notNull().defaultNow(),
   lastModified: timestamp("last_modified").notNull().defaultNow(),
 });
@@ -46,6 +47,18 @@ export const templates = pgTable("templates", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
+export const gitCommits = pgTable("git_commits", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  projectId: varchar("project_id").notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  commitHash: text("commit_hash").notNull(),
+  message: text("message").notNull(),
+  author: text("author").notNull(),
+  email: text("email"),
+  branch: text("branch").notNull().default("main"),
+  filesChanged: jsonb("files_changed"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
 // Insert schemas
 export const insertProjectSchema = createInsertSchema(projects).omit({
   id: true,
@@ -70,6 +83,11 @@ export const insertTemplateSchema = createInsertSchema(templates).omit({
   createdAt: true,
 });
 
+export const insertGitCommitSchema = createInsertSchema(gitCommits).omit({
+  id: true,
+  createdAt: true,
+});
+
 // Types
 export type Project = typeof projects.$inferSelect;
 export type InsertProject = z.infer<typeof insertProjectSchema>;
@@ -82,6 +100,9 @@ export type InsertBuildJob = z.infer<typeof insertBuildJobSchema>;
 
 export type Template = typeof templates.$inferSelect;
 export type InsertTemplate = z.infer<typeof insertTemplateSchema>;
+
+export type GitCommit = typeof gitCommits.$inferSelect;
+export type InsertGitCommit = z.infer<typeof insertGitCommitSchema>;
 
 // Additional types for UI
 export interface FileTreeNode {
@@ -102,4 +123,24 @@ export interface BuildLogEntry {
 export interface ServerConfig {
   url: string;
   apiKey?: string;
+}
+
+export interface ProjectSettings {
+  buildVersion?: string;
+  minSdkVersion?: number;
+  targetSdkVersion?: number;
+  packageName?: string;
+  enableProguard?: boolean;
+  enableR8?: boolean;
+  customGradleConfig?: string;
+  environmentVariables?: Record<string, string>;
+}
+
+export interface SearchResult {
+  fileId: string;
+  filePath: string;
+  lineNumber: number;
+  lineContent: string;
+  matchStart: number;
+  matchEnd: number;
 }

@@ -7,11 +7,14 @@ import {
   type InsertBuildJob,
   type Template,
   type InsertTemplate,
+  type GitCommit,
+  type InsertGitCommit,
   type FileTreeNode,
   projects,
   files,
   buildJobs,
-  templates
+  templates,
+  gitCommits
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/neon-http";
 import { neon } from "@neondatabase/serverless";
@@ -36,6 +39,7 @@ export interface IStorage {
   getFileTree(projectId: string): Promise<FileTreeNode[]>;
   createFile(file: InsertFile): Promise<File>;
   updateFile(projectId: string, path: string, content: string): Promise<File | undefined>;
+  renameFile(projectId: string, oldPath: string, newPath: string): Promise<File | undefined>;
   deleteFile(projectId: string, path: string): Promise<boolean>;
 
   getBuildJob(id: string): Promise<BuildJob | undefined>;
@@ -49,6 +53,12 @@ export interface IStorage {
   getAllTemplates(): Promise<Template[]>;
   createTemplate(template: InsertTemplate): Promise<Template>;
   seedTemplates(): Promise<void>;
+
+  getGitCommit(id: string): Promise<GitCommit | undefined>;
+  getProjectCommits(projectId: string, branch?: string): Promise<GitCommit[]>;
+  createGitCommit(commit: InsertGitCommit): Promise<GitCommit>;
+  getProjectBranches(projectId: string): Promise<string[]>;
+  deleteProjectCommits(projectId: string, branch: string): Promise<boolean>;
 }
 
 export class DbStorage implements IStorage {
@@ -198,6 +208,20 @@ export class DbStorage implements IStorage {
     return result[0];
   }
 
+  async renameFile(projectId: string, oldPath: string, newPath: string): Promise<File | undefined> {
+    const result = await db
+      .update(files)
+      .set({ path: newPath, updatedAt: new Date() })
+      .where(and(eq(files.projectId, projectId), eq(files.path, oldPath)))
+      .returning();
+    
+    if (result[0]) {
+      await this.updateProject(projectId, {});
+    }
+    
+    return result[0];
+  }
+
   async deleteFile(projectId: string, path: string): Promise<boolean> {
     const result = await db
       .delete(files)
@@ -274,6 +298,51 @@ export class DbStorage implements IStorage {
   async createTemplate(insertTemplate: InsertTemplate): Promise<Template> {
     const result = await db.insert(templates).values(insertTemplate).returning();
     return result[0];
+  }
+
+  async getGitCommit(id: string): Promise<GitCommit | undefined> {
+    const result = await db.select().from(gitCommits).where(eq(gitCommits.id, id));
+    return result[0];
+  }
+
+  async getProjectCommits(projectId: string, branch?: string): Promise<GitCommit[]> {
+    if (branch) {
+      return await db
+        .select()
+        .from(gitCommits)
+        .where(and(eq(gitCommits.projectId, projectId), eq(gitCommits.branch, branch)))
+        .orderBy(desc(gitCommits.createdAt));
+    }
+    
+    return await db
+      .select()
+      .from(gitCommits)
+      .where(eq(gitCommits.projectId, projectId))
+      .orderBy(desc(gitCommits.createdAt));
+  }
+
+  async createGitCommit(insertCommit: InsertGitCommit): Promise<GitCommit> {
+    const result = await db.insert(gitCommits).values(insertCommit).returning();
+    return result[0];
+  }
+
+  async getProjectBranches(projectId: string): Promise<string[]> {
+    const commits = await db
+      .select({ branch: gitCommits.branch })
+      .from(gitCommits)
+      .where(eq(gitCommits.projectId, projectId));
+    
+    const uniqueBranches = Array.from(new Set(commits.map(c => c.branch)));
+    return uniqueBranches;
+  }
+
+  async deleteProjectCommits(projectId: string, branch: string): Promise<boolean> {
+    const result = await db
+      .delete(gitCommits)
+      .where(and(eq(gitCommits.projectId, projectId), eq(gitCommits.branch, branch)))
+      .returning();
+    
+    return result.length > 0;
   }
 }
 
