@@ -7,19 +7,30 @@ import {
   type InsertBuildJob,
   type Template,
   type InsertTemplate,
-  type FileTreeNode
+  type FileTreeNode,
+  projects,
+  files,
+  buildJobs,
+  templates
 } from "@shared/schema";
-import { randomUUID } from "crypto";
+import { drizzle } from "drizzle-orm/neon-http";
+import { neon } from "@neondatabase/serverless";
+import { eq, desc, and, or } from "drizzle-orm";
+
+if (!process.env.DATABASE_URL) {
+  throw new Error("DATABASE_URL is not set");
+}
+
+const sql = neon(process.env.DATABASE_URL);
+const db = drizzle(sql);
 
 export interface IStorage {
-  // Projects
   getProject(id: string): Promise<Project | undefined>;
   getAllProjects(): Promise<Project[]>;
   createProject(project: InsertProject): Promise<Project>;
   updateProject(id: string, project: Partial<InsertProject>): Promise<Project | undefined>;
   deleteProject(id: string): Promise<boolean>;
 
-  // Files
   getFile(projectId: string, path: string): Promise<File | undefined>;
   getProjectFiles(projectId: string): Promise<File[]>;
   getFileTree(projectId: string): Promise<FileTreeNode[]>;
@@ -27,7 +38,6 @@ export interface IStorage {
   updateFile(projectId: string, path: string, content: string): Promise<File | undefined>;
   deleteFile(projectId: string, path: string): Promise<boolean>;
 
-  // Build Jobs
   getBuildJob(id: string): Promise<BuildJob | undefined>;
   getProjectBuilds(projectId: string): Promise<BuildJob[]>;
   getCurrentBuild(projectId: string): Promise<BuildJob | undefined>;
@@ -35,28 +45,26 @@ export interface IStorage {
   createBuildJob(buildJob: InsertBuildJob): Promise<BuildJob>;
   updateBuildJob(id: string, buildJob: Partial<BuildJob>): Promise<BuildJob | undefined>;
 
-  // Templates
   getTemplate(id: string): Promise<Template | undefined>;
   getAllTemplates(): Promise<Template[]>;
   createTemplate(template: InsertTemplate): Promise<Template>;
+  seedTemplates(): Promise<void>;
 }
 
-export class MemStorage implements IStorage {
-  private projects: Map<string, Project>;
-  private files: Map<string, File>;
-  private buildJobs: Map<string, BuildJob>;
-  private templates: Map<string, Template>;
-
+export class DbStorage implements IStorage {
   constructor() {
-    this.projects = new Map();
-    this.files = new Map();
-    this.buildJobs = new Map();
-    this.templates = new Map();
-    this.seedTemplates();
+    this.init();
   }
 
-  private seedTemplates() {
-    const templates: InsertTemplate[] = [
+  private async init() {
+    const existingTemplates = await this.getAllTemplates();
+    if (existingTemplates.length === 0) {
+      await this.seedTemplates();
+    }
+  }
+
+  async seedTemplates() {
+    const templateData: InsertTemplate[] = [
       {
         name: "React Native Blank",
         description: "A minimal React Native app with navigation setup",
@@ -84,84 +92,57 @@ export class MemStorage implements IStorage {
       },
     ];
 
-    templates.forEach(t => {
-      const id = randomUUID();
-      this.templates.set(id, {
-        ...t,
-        id,
-        createdAt: new Date(),
-      });
-    });
+    for (const template of templateData) {
+      await db.insert(templates).values(template);
+    }
   }
 
-  // Projects
   async getProject(id: string): Promise<Project | undefined> {
-    return this.projects.get(id);
+    const result = await db.select().from(projects).where(eq(projects.id, id));
+    return result[0];
   }
 
   async getAllProjects(): Promise<Project[]> {
-    return Array.from(this.projects.values()).sort((a, b) => 
-      new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime()
-    );
+    return await db.select().from(projects).orderBy(desc(projects.lastModified));
   }
 
   async createProject(insertProject: InsertProject): Promise<Project> {
-    const id = randomUUID();
-    const now = new Date();
-    const project: Project = {
-      ...insertProject,
-      id,
-      createdAt: now,
-      lastModified: now,
-    };
-    this.projects.set(id, project);
-    return project;
+    const result = await db.insert(projects).values(insertProject).returning();
+    return result[0];
   }
 
   async updateProject(id: string, updates: Partial<InsertProject>): Promise<Project | undefined> {
-    const project = this.projects.get(id);
-    if (!project) return undefined;
-    
-    const updated: Project = {
-      ...project,
-      ...updates,
-      lastModified: new Date(),
-    };
-    this.projects.set(id, updated);
-    return updated;
+    const result = await db
+      .update(projects)
+      .set({ ...updates, lastModified: new Date() })
+      .where(eq(projects.id, id))
+      .returning();
+    return result[0];
   }
 
   async deleteProject(id: string): Promise<boolean> {
-    const deleted = this.projects.delete(id);
-    if (deleted) {
-      Array.from(this.files.values())
-        .filter(f => f.projectId === id)
-        .forEach(f => this.files.delete(f.id));
-      
-      Array.from(this.buildJobs.values())
-        .filter(b => b.projectId === id)
-        .forEach(b => this.buildJobs.delete(b.id));
-    }
-    return deleted;
+    const result = await db.delete(projects).where(eq(projects.id, id)).returning();
+    return result.length > 0;
   }
 
-  // Files
   async getFile(projectId: string, path: string): Promise<File | undefined> {
-    return Array.from(this.files.values()).find(
-      f => f.projectId === projectId && f.path === path
-    );
+    const result = await db
+      .select()
+      .from(files)
+      .where(and(eq(files.projectId, projectId), eq(files.path, path)));
+    return result[0];
   }
 
   async getProjectFiles(projectId: string): Promise<File[]> {
-    return Array.from(this.files.values()).filter(f => f.projectId === projectId);
+    return await db.select().from(files).where(eq(files.projectId, projectId));
   }
 
   async getFileTree(projectId: string): Promise<FileTreeNode[]> {
-    const files = await this.getProjectFiles(projectId);
+    const projectFiles = await this.getProjectFiles(projectId);
     const tree: FileTreeNode[] = [];
     const nodeMap = new Map<string, FileTreeNode>();
 
-    files.forEach(file => {
+    projectFiles.forEach(file => {
       const parts = file.path.split('/');
       let currentPath = '';
 
@@ -176,7 +157,7 @@ export class MemStorage implements IStorage {
             name: part,
             path: currentPath,
             type: isFile ? 'file' : 'folder',
-            language: isFile ? file.language : undefined,
+            language: isFile ? file.language || undefined : undefined,
             children: isFile ? undefined : [],
           };
 
@@ -198,112 +179,102 @@ export class MemStorage implements IStorage {
   }
 
   async createFile(insertFile: InsertFile): Promise<File> {
-    const id = randomUUID();
-    const now = new Date();
-    const file: File = {
-      ...insertFile,
-      id,
-      createdAt: now,
-      updatedAt: now,
-    };
-    this.files.set(id, file);
-    
+    const result = await db.insert(files).values(insertFile).returning();
     await this.updateProject(insertFile.projectId, {});
-    return file;
+    return result[0];
   }
 
   async updateFile(projectId: string, path: string, content: string): Promise<File | undefined> {
-    const file = await this.getFile(projectId, path);
-    if (!file) return undefined;
-
-    const updated: File = {
-      ...file,
-      content,
-      updatedAt: new Date(),
-    };
-    this.files.set(file.id, updated);
+    const result = await db
+      .update(files)
+      .set({ content, updatedAt: new Date() })
+      .where(and(eq(files.projectId, projectId), eq(files.path, path)))
+      .returning();
     
-    await this.updateProject(projectId, {});
-    return updated;
+    if (result[0]) {
+      await this.updateProject(projectId, {});
+    }
+    
+    return result[0];
   }
 
   async deleteFile(projectId: string, path: string): Promise<boolean> {
-    const file = await this.getFile(projectId, path);
-    if (!file) return false;
+    const result = await db
+      .delete(files)
+      .where(and(eq(files.projectId, projectId), eq(files.path, path)))
+      .returning();
     
-    const deleted = this.files.delete(file.id);
-    if (deleted) {
+    if (result.length > 0) {
       await this.updateProject(projectId, {});
     }
-    return deleted;
+    
+    return result.length > 0;
   }
 
-  // Build Jobs
   async getBuildJob(id: string): Promise<BuildJob | undefined> {
-    return this.buildJobs.get(id);
+    const result = await db.select().from(buildJobs).where(eq(buildJobs.id, id));
+    return result[0];
   }
 
   async getProjectBuilds(projectId: string): Promise<BuildJob[]> {
-    return Array.from(this.buildJobs.values())
-      .filter(b => b.projectId === projectId)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return await db
+      .select()
+      .from(buildJobs)
+      .where(eq(buildJobs.projectId, projectId))
+      .orderBy(desc(buildJobs.createdAt));
   }
 
   async getCurrentBuild(projectId: string): Promise<BuildJob | undefined> {
-    const builds = await this.getProjectBuilds(projectId);
-    return builds.find(b => b.status === 'building' || b.status === 'queued') || builds[0];
+    const activeBuilds = await db
+      .select()
+      .from(buildJobs)
+      .where(
+        and(
+          eq(buildJobs.projectId, projectId),
+          or(eq(buildJobs.status, 'building'), eq(buildJobs.status, 'queued'))
+        )
+      )
+      .orderBy(desc(buildJobs.createdAt));
+    
+    if (activeBuilds.length > 0) {
+      return activeBuilds[0];
+    }
+
+    const allBuilds = await this.getProjectBuilds(projectId);
+    return allBuilds[0];
   }
 
   async getAllBuilds(): Promise<BuildJob[]> {
-    return Array.from(this.buildJobs.values()).sort((a, b) => 
-      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    );
+    return await db.select().from(buildJobs).orderBy(desc(buildJobs.createdAt));
   }
 
   async createBuildJob(insertBuildJob: InsertBuildJob): Promise<BuildJob> {
-    const id = randomUUID();
-    const now = new Date();
-    const buildJob: BuildJob = {
-      ...insertBuildJob,
-      id,
-      createdAt: now,
-      completedAt: null,
-    };
-    this.buildJobs.set(id, buildJob);
-    return buildJob;
+    const result = await db.insert(buildJobs).values(insertBuildJob).returning();
+    return result[0];
   }
 
   async updateBuildJob(id: string, updates: Partial<BuildJob>): Promise<BuildJob | undefined> {
-    const buildJob = this.buildJobs.get(id);
-    if (!buildJob) return undefined;
-
-    const updated: BuildJob = {
-      ...buildJob,
-      ...updates,
-    };
-    this.buildJobs.set(id, updated);
-    return updated;
+    const result = await db
+      .update(buildJobs)
+      .set(updates)
+      .where(eq(buildJobs.id, id))
+      .returning();
+    return result[0];
   }
 
-  // Templates
   async getTemplate(id: string): Promise<Template | undefined> {
-    return this.templates.get(id);
+    const result = await db.select().from(templates).where(eq(templates.id, id));
+    return result[0];
   }
 
   async getAllTemplates(): Promise<Template[]> {
-    return Array.from(this.templates.values());
+    return await db.select().from(templates);
   }
 
   async createTemplate(insertTemplate: InsertTemplate): Promise<Template> {
-    const id = randomUUID();
-    const template: Template = {
-      ...insertTemplate,
-      id,
-      createdAt: new Date(),
-    };
-    this.templates.set(id, template);
-    return template;
+    const result = await db.insert(templates).values(insertTemplate).returning();
+    return result[0];
   }
 }
 
-export const storage = new MemStorage();
+export const storage = new DbStorage();
