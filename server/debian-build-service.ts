@@ -1,5 +1,4 @@
 import type { BuildLogEntry } from "@shared/schema";
-import fetch from "node-fetch";
 import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
 import { Readable } from "stream";

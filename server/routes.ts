@@ -9,6 +9,7 @@ import {
   type BuildLogEntry
 } from "@shared/schema";
 import { z } from "zod";
+import { debianBuildService, type DebianServerConfig } from "./debian-build-service";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
@@ -252,6 +253,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ error: "Project not found" });
       }
 
+      const serverConfig = debianBuildService.getConfig();
+      if (!serverConfig) {
+        return res.status(400).json({ 
+          error: "Debian server not configured. Please configure in Settings." 
+        });
+      }
+
       await storage.updateProject(req.params.id, { status: "building" });
 
       const build = await storage.createBuildJob({
@@ -261,61 +269,138 @@ export async function registerRoutes(app: Express): Promise<Server> {
         buildConfig: req.body.config || {},
       });
 
-      setTimeout(async () => {
-        const buildingUpdate = await storage.updateBuildJob(build.id, { 
-          status: "building",
-          logs: [
-            { timestamp: new Date().toISOString(), level: "info", message: "Build started" },
-            { timestamp: new Date().toISOString(), level: "info", message: "Initializing build environment..." }
-          ] as any
-        });
-        if (buildingUpdate) {
-          broadcastBuildUpdate(build.id, req.params.id, buildingUpdate);
-        }
+      const projectFiles = await storage.getProjectFiles(req.params.id);
+      const files = projectFiles.map(f => ({
+        path: f.path,
+        content: f.content
+      }));
 
-        setTimeout(async () => {
-          const success = Math.random() > 0.3;
-          
-          if (success) {
-            const completedBuild = await storage.updateBuildJob(build.id, {
-              status: "success",
-              completedAt: new Date(),
-              apkUrl: `/downloads/${project.name.replace(/\s+/g, '-')}.apk`,
-              logs: [
-                { timestamp: new Date().toISOString(), level: "info", message: "Build started" },
-                { timestamp: new Date().toISOString(), level: "info", message: "Compiling sources..." },
-                { timestamp: new Date().toISOString(), level: "info", message: "Processing resources..." },
-                { timestamp: new Date().toISOString(), level: "info", message: "Generating APK..." },
-                { timestamp: new Date().toISOString(), level: "success", message: "Build completed successfully!" }
-              ] as any
-            });
-            await storage.updateProject(req.params.id, { status: "active" });
-            if (completedBuild) {
-              broadcastBuildUpdate(build.id, req.params.id, completedBuild);
+      (async () => {
+        try {
+          await storage.updateBuildJob(build.id, {
+            status: "queued",
+            logs: [
+              { timestamp: new Date().toISOString(), level: "info", message: "Submitting build to Debian server..." }
+            ] as any
+          });
+
+          const debianBuildId = await debianBuildService.submitBuild({
+            projectId: project.id,
+            projectName: project.name,
+            framework: project.framework,
+            files,
+            buildConfig: req.body.config || {}
+          });
+
+          await storage.updateBuildJob(build.id, {
+            status: "building",
+            logs: [
+              { timestamp: new Date().toISOString(), level: "info", message: "Build submitted successfully" },
+              { timestamp: new Date().toISOString(), level: "info", message: `Debian Build ID: ${debianBuildId}` },
+              { timestamp: new Date().toISOString(), level: "info", message: "Waiting for build to start..." }
+            ] as any
+          });
+
+          const finalStatus = await debianBuildService.pollBuildStatus(
+            debianBuildId,
+            async (status) => {
+              const updatedBuild = await storage.updateBuildJob(build.id, {
+                status: status.status,
+                logs: status.logs as any,
+                apkUrl: status.apkUrl,
+                errorMessage: status.errorMessage
+              });
+              
+              if (updatedBuild) {
+                broadcastBuildUpdate(build.id, req.params.id, updatedBuild);
+              }
             }
-          } else {
-            const failedBuild = await storage.updateBuildJob(build.id, {
-              status: "failed",
-              completedAt: new Date(),
-              errorMessage: "Build failed: Compilation error in MainActivity.java",
-              logs: [
-                { timestamp: new Date().toISOString(), level: "info", message: "Build started" },
-                { timestamp: new Date().toISOString(), level: "info", message: "Compiling sources..." },
-                { timestamp: new Date().toISOString(), level: "error", message: "Error: Cannot find symbol MainActivity" },
-                { timestamp: new Date().toISOString(), level: "error", message: "Build failed" }
-              ] as any
-            });
-            await storage.updateProject(req.params.id, { status: "active" });
-            if (failedBuild) {
-              broadcastBuildUpdate(build.id, req.params.id, failedBuild);
-            }
-          }
-        }, 8000);
-      }, 2000);
+          );
+
+          await storage.updateBuildJob(build.id, {
+            status: finalStatus.status,
+            completedAt: new Date(),
+            logs: finalStatus.logs as any,
+            apkUrl: finalStatus.apkUrl,
+            errorMessage: finalStatus.errorMessage
+          });
+
+          await storage.updateProject(req.params.id, { status: "active" });
+
+        } catch (error) {
+          await storage.updateBuildJob(build.id, {
+            status: "failed",
+            completedAt: new Date(),
+            errorMessage: error instanceof Error ? error.message : "Build failed",
+            logs: [
+              { timestamp: new Date().toISOString(), level: "error", message: "Build failed" },
+              { timestamp: new Date().toISOString(), level: "error", message: error instanceof Error ? error.message : "Unknown error" }
+            ] as any
+          });
+          await storage.updateProject(req.params.id, { status: "active" });
+        }
+      })();
 
       res.status(201).json(build);
     } catch (error) {
+      await storage.updateProject(req.params.id, { status: "active" });
       res.status(500).json({ error: "Failed to start build" });
+    }
+  });
+
+  // Server Configuration
+  app.get("/api/server/config", async (req, res) => {
+    try {
+      const config = debianBuildService.getConfig();
+      if (!config) {
+        return res.json({ configured: false });
+      }
+      res.json({ 
+        configured: true, 
+        url: config.url,
+        hasApiKey: !!config.apiKey 
+      });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get server config" });
+    }
+  });
+
+  app.post("/api/server/config", async (req, res) => {
+    try {
+      const { url, apiKey } = req.body;
+      
+      if (!url) {
+        return res.status(400).json({ error: "Server URL is required" });
+      }
+
+      debianBuildService.setConfig({ url, apiKey });
+      
+      res.json({ 
+        success: true, 
+        message: "Server configuration updated" 
+      });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to update server config" });
+    }
+  });
+
+  app.get("/api/server/health", async (req, res) => {
+    try {
+      const config = debianBuildService.getConfig();
+      if (!config) {
+        return res.status(400).json({ 
+          healthy: false, 
+          error: "Server not configured" 
+        });
+      }
+
+      const healthy = await debianBuildService.healthCheck();
+      res.json({ healthy });
+    } catch (error) {
+      res.status(500).json({ 
+        healthy: false, 
+        error: error instanceof Error ? error.message : "Health check failed" 
+      });
     }
   });
 
