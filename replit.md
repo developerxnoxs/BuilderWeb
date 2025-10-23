@@ -22,17 +22,20 @@ A powerful web-based IDE for building real Android applications using React Nati
 - **Builds:** Build history and APK downloads
 - **Settings:** Configure Debian server connection
 
-### Backend (Planned)
-- **Project Management:** CRUD operations for projects
-- **File System:** Virtual file system for project files
-- **Build Queue:** Submit builds to Debian server
-- **WebSocket:** Real-time build log streaming
-- **Templates:** Pre-configured project templates
+### Backend
+- **Project Management:** CRUD operations for projects ✅
+- **File System:** Virtual file system for project files ✅
+- **Build Queue:** Submit builds to Debian server ✅
+- **WebSocket:** Real-time build log streaming ✅
+- **Templates:** Pre-configured project templates ✅
 
-### External Integration
-- **Debian Server:** GPU-powered server for Android APK compilation
-- Handles React Native, Flutter, and Capacitor builds
-- Returns built APK files for download
+### External Integration - Debian Build Server
+- **Production APK Compilation:** Real Android APK compilation using Android SDK ✅
+- **React Native:** npm install → react-native bundle → gradlew assembleRelease → APK signing
+- **Flutter:** flutter pub get → flutter build apk → APK signing
+- **Capacitor:** npm install → npm run build → cap sync → gradlew assembleRelease → APK signing
+- **APK Signing:** Automatic keystore generation and apksigner (zipalign → sign → verify)
+- **Real-time Logs:** Build progress streaming via WebSocket
 
 ## Data Models
 
@@ -104,6 +107,25 @@ A powerful web-based IDE for building real Android applications using React Nati
 ✅ Build queue management
 ✅ APK download
 
+### Production Build System (October 2025)
+✅ **Real APK Compilation Implemented**
+- Android SDK integration with proper environment setup
+- Flutter SDK support (3.24.5+)
+- React Native CLI with Watchman
+- Automatic APK signing with keystore generation
+- Build verification (apksigner verify)
+- Production-ready setup scripts
+
+**Setup Scripts Available:**
+- `debian-server/setup-android-sdk.sh` - Install Android SDK, Build Tools, Platform Tools
+- `debian-server/setup-flutter.sh` - Install Flutter SDK
+- `debian-server/setup-react-native.sh` - Install React Native CLI & Watchman
+- `debian-server/keystore-generator.ts` - Automatic keystore management
+
+**Documentation:**
+- `PRODUCTION_SETUP.md` - Complete production setup guide
+- `DEBIAN_SERVER_SETUP.md` - Server configuration and deployment
+
 ### Future Enhancements
 - GitHub remote push/pull integration
 - Visual UI builder (drag-and-drop)
@@ -112,6 +134,8 @@ A powerful web-based IDE for building real Android applications using React Nati
 - Android emulator preview
 - Automated testing
 - CI/CD pipeline
+- Gradle dependency caching for faster builds
+- Multiple build server load balancing
 
 ## User Flow
 
