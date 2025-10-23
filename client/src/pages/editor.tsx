@@ -9,6 +9,9 @@ import { BuildStatusPanel } from "@/components/build-status-panel";
 import { GitPanel } from "@/components/git-panel";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { 
   Play, 
   Save, 
@@ -48,6 +51,10 @@ export default function Editor() {
   const [fileTreeCollapsed, setFileTreeCollapsed] = useState(false);
   const [buildPanelCollapsed, setBuildPanelCollapsed] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState<"build" | "git">("build");
+  const [newFileDialogOpen, setNewFileDialogOpen] = useState(false);
+  const [newFolderDialogOpen, setNewFolderDialogOpen] = useState(false);
+  const [newFileName, setNewFileName] = useState("");
+  const [newFolderName, setNewFolderName] = useState("");
 
   const { data: project } = useQuery<Project>({
     queryKey: ["/api/projects", projectId],
@@ -107,6 +114,50 @@ export default function Editor() {
       toast({
         title: "Build failed",
         description: "Failed to start build process.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const createFileMutation = useMutation({
+    mutationFn: async (data: { path: string; content: string; type: string; language?: string }) => {
+      return await apiRequest("POST", `/api/projects/${projectId}/files`, data);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
+      setNewFileDialogOpen(false);
+      setNewFileName("");
+      toast({
+        title: "File created",
+        description: "New file has been created successfully.",
+      });
+    },
+    onError: () => {
+      toast({
+        title: "Error",
+        description: "Failed to create file.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const createFolderMutation = useMutation({
+    mutationFn: async (data: { path: string; type: string }) => {
+      return await apiRequest("POST", `/api/projects/${projectId}/files`, data);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
+      setNewFolderDialogOpen(false);
+      setNewFolderName("");
+      toast({
+        title: "Folder created",
+        description: "New folder has been created successfully.",
+      });
+    },
+    onError: () => {
+      toast({
+        title: "Error",
+        description: "Failed to create folder.",
         variant: "destructive",
       });
     },
@@ -173,6 +224,33 @@ export default function Editor() {
     buildMutation.mutate();
   };
 
+  const handleCreateFile = () => {
+    if (!newFileName.trim()) return;
+    
+    const language = newFileName.endsWith('.js') || newFileName.endsWith('.jsx') ? 'javascript' :
+                    newFileName.endsWith('.ts') || newFileName.endsWith('.tsx') ? 'typescript' :
+                    newFileName.endsWith('.java') ? 'java' :
+                    newFileName.endsWith('.kt') ? 'kotlin' :
+                    newFileName.endsWith('.xml') ? 'xml' :
+                    newFileName.endsWith('.json') ? 'json' : undefined;
+
+    createFileMutation.mutate({
+      path: newFileName.trim(),
+      content: "",
+      type: "file",
+      language,
+    });
+  };
+
+  const handleCreateFolder = () => {
+    if (!newFolderName.trim()) return;
+    
+    createFolderMutation.mutate({
+      path: newFolderName.trim(),
+      type: "folder",
+    });
+  };
+
   const activeFile = openFiles.find(f => f.path === activeTab);
 
   useEffect(() => {
@@ -220,6 +298,7 @@ export default function Editor() {
           <Button
             variant="outline"
             size="sm"
+            onClick={() => setNewFolderDialogOpen(true)}
             data-testid="button-new-folder"
           >
             <FolderPlus className="h-4 w-4" />
@@ -227,6 +306,7 @@ export default function Editor() {
           <Button
             variant="outline"
             size="sm"
+            onClick={() => setNewFileDialogOpen(true)}
             data-testid="button-new-file"
           >
             <FilePlus className="h-4 w-4" />
@@ -403,6 +483,96 @@ export default function Editor() {
           )}
         </ResizablePanelGroup>
       </div>
+
+      {/* Create File Dialog */}
+      <Dialog open={newFileDialogOpen} onOpenChange={setNewFileDialogOpen}>
+        <DialogContent data-testid="dialog-new-file">
+          <DialogHeader>
+            <DialogTitle>Create New File</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid gap-2">
+              <Label htmlFor="file-name">File Name</Label>
+              <Input
+                id="file-name"
+                placeholder="example.js"
+                value={newFileName}
+                onChange={(e) => setNewFileName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleCreateFile();
+                  }
+                }}
+                data-testid="input-file-name"
+              />
+              <p className="text-xs text-muted-foreground">
+                Include path like: src/components/Button.tsx
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setNewFileDialogOpen(false)}
+              data-testid="button-cancel-file"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleCreateFile}
+              disabled={!newFileName.trim() || createFileMutation.isPending}
+              data-testid="button-create-file"
+            >
+              Create File
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Create Folder Dialog */}
+      <Dialog open={newFolderDialogOpen} onOpenChange={setNewFolderDialogOpen}>
+        <DialogContent data-testid="dialog-new-folder">
+          <DialogHeader>
+            <DialogTitle>Create New Folder</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid gap-2">
+              <Label htmlFor="folder-name">Folder Name</Label>
+              <Input
+                id="folder-name"
+                placeholder="components"
+                value={newFolderName}
+                onChange={(e) => setNewFolderName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleCreateFolder();
+                  }
+                }}
+                data-testid="input-folder-name"
+              />
+              <p className="text-xs text-muted-foreground">
+                Include path like: src/components
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setNewFolderDialogOpen(false)}
+              data-testid="button-cancel-folder"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleCreateFolder}
+              disabled={!newFolderName.trim() || createFolderMutation.isPending}
+              data-testid="button-create-folder"
+            >
+              Create Folder
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
