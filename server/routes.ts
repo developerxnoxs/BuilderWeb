@@ -13,6 +13,7 @@ import { debianBuildService, type DebianServerConfig } from "./debian-build-serv
 import { buildQueue } from "./build-queue";
 import { gitService } from "./git-service";
 import { realGitService } from "./real-git-service";
+import { GitHubService } from "./github";
 import multer from "multer";
 import archiver from "archiver";
 import { createWriteStream, createReadStream } from "fs";
@@ -948,6 +949,203 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ success: true, currentBranch: branch });
     } catch (error) {
       res.status(500).json({ error: "Failed to checkout branch" });
+    }
+  });
+
+  // GitHub Integration
+  app.get("/api/github/repos", async (req, res) => {
+    try {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      if (!token) {
+        return res.status(401).json({ error: "GitHub token required" });
+      }
+
+      const github = new GitHubService(token);
+      const repos = await github.listRepos();
+      res.json(repos);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to fetch repositories" });
+    }
+  });
+
+  app.get("/api/github/user", async (req, res) => {
+    try {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      if (!token) {
+        return res.status(401).json({ error: "GitHub token required" });
+      }
+
+      const github = new GitHubService(token);
+      const user = await github.getUserInfo();
+      res.json(user);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to fetch user info" });
+    }
+  });
+
+  app.post("/api/github/import", async (req, res) => {
+    try {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      if (!token) {
+        return res.status(401).json({ error: "GitHub token required" });
+      }
+
+      const { repoFullName, branch = "main", framework } = req.body;
+      
+      if (!repoFullName || !framework) {
+        return res.status(400).json({ error: "Repository name and framework are required" });
+      }
+
+      const [owner, repo] = repoFullName.split('/');
+      if (!owner || !repo) {
+        return res.status(400).json({ error: "Invalid repository name format" });
+      }
+
+      const github = new GitHubService(token);
+      
+      const repoData = await github.fetch(`/repos/${owner}/${repo}`);
+      const files = await github.getRepoTree(owner, repo, branch);
+
+      const project = await storage.createProject({
+        name: repo,
+        description: repoData.description || `Imported from GitHub: ${repoFullName}`,
+        framework,
+        status: "active",
+        githubRepo: repoFullName,
+        githubBranch: branch,
+        githubUrl: repoData.html_url,
+      });
+
+      for (const file of files) {
+        const language = file.path.endsWith('.js') || file.path.endsWith('.jsx') ? 'javascript' :
+                        file.path.endsWith('.ts') || file.path.endsWith('.tsx') ? 'typescript' :
+                        file.path.endsWith('.java') ? 'java' :
+                        file.path.endsWith('.kt') ? 'kotlin' :
+                        file.path.endsWith('.xml') ? 'xml' :
+                        file.path.endsWith('.json') ? 'json' : undefined;
+
+        await storage.createFile({
+          projectId: project.id,
+          path: file.path,
+          content: file.content,
+          type: 'file',
+          language,
+        });
+      }
+
+      const commits = await github.listCommits(owner, repo, branch, 10);
+      for (const commit of commits) {
+        await storage.createGitCommit({
+          projectId: project.id,
+          commitHash: commit.sha,
+          message: commit.commit.message,
+          author: commit.commit.author.name,
+          email: commit.commit.author.email,
+          branch,
+        });
+      }
+
+      res.status(201).json(project);
+    } catch (error: any) {
+      console.error('GitHub import error:', error);
+      res.status(500).json({ error: error.message || "Failed to import repository" });
+    }
+  });
+
+  app.post("/api/github/push/:id", async (req, res) => {
+    try {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      if (!token) {
+        return res.status(401).json({ error: "GitHub token required" });
+      }
+
+      const project = await storage.getProject(req.params.id);
+      if (!project) {
+        return res.status(404).json({ error: "Project not found" });
+      }
+
+      if (!project.githubRepo || !project.githubBranch) {
+        return res.status(400).json({ error: "Project is not linked to a GitHub repository" });
+      }
+
+      const { message } = req.body;
+      if (!message) {
+        return res.status(400).json({ error: "Commit message is required" });
+      }
+
+      const [owner, repo] = project.githubRepo.split('/');
+      const files = await storage.getProjectFiles(req.params.id);
+      
+      const github = new GitHubService(token);
+      const githubFiles = files
+        .filter(f => f.type === 'file')
+        .map(f => ({
+          path: f.path,
+          content: f.content,
+          type: 'file' as const,
+        }));
+
+      const commit = await github.createCommit(owner, repo, project.githubBranch, message, githubFiles);
+
+      await storage.createGitCommit({
+        projectId: req.params.id,
+        commitHash: commit.sha,
+        message,
+        author: commit.author.name,
+        email: commit.author.email,
+        branch: project.githubBranch,
+      });
+
+      res.json({ success: true, commit });
+    } catch (error: any) {
+      console.error('GitHub push error:', error);
+      res.status(500).json({ error: error.message || "Failed to push to GitHub" });
+    }
+  });
+
+  app.post("/api/github/sync/:id", async (req, res) => {
+    try {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      if (!token) {
+        return res.status(401).json({ error: "GitHub token required" });
+      }
+
+      const project = await storage.getProject(req.params.id);
+      if (!project) {
+        return res.status(404).json({ error: "Project not found" });
+      }
+
+      if (!project.githubRepo || !project.githubBranch) {
+        return res.status(400).json({ error: "Project is not linked to a GitHub repository" });
+      }
+
+      const [owner, repo] = project.githubRepo.split('/');
+      const github = new GitHubService(token);
+      
+      const commits = await github.listCommits(owner, repo, project.githubBranch, 20);
+      let syncedCount = 0;
+
+      for (const commit of commits) {
+        const existing = await storage.getProjectCommits(req.params.id);
+        const exists = existing.some(c => c.commitHash === commit.sha);
+        
+        if (!exists) {
+          await storage.createGitCommit({
+            projectId: req.params.id,
+            commitHash: commit.sha,
+            message: commit.commit.message,
+            author: commit.commit.author.name,
+            email: commit.commit.author.email,
+            branch: project.githubBranch,
+          });
+          syncedCount++;
+        }
+      }
+
+      res.json({ success: true, syncedCommits: syncedCount });
+    } catch (error: any) {
+      console.error('GitHub sync error:', error);
+      res.status(500).json({ error: error.message || "Failed to sync with GitHub" });
     }
   });
 
