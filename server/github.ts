@@ -6,14 +6,20 @@ export class GitHubService {
   constructor(private accessToken: string) {}
 
   async fetch(endpoint: string, options: RequestInit = {}) {
+    const headers: Record<string, string> = {
+      "Authorization": `Bearer ${this.accessToken}`,
+      "Accept": "application/vnd.github.v3+json",
+      "User-Agent": "Android-Studio-Web",
+      ...(options.headers as Record<string, string>),
+    };
+
+    if (options.method === 'POST' || options.method === 'PATCH' || options.method === 'PUT') {
+      headers["Content-Type"] = "application/json; charset=utf-8";
+    }
+
     const response = await fetch(`${GITHUB_API_BASE}${endpoint}`, {
       ...options,
-      headers: {
-        "Authorization": `Bearer ${this.accessToken}`,
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "Android-Studio-Web",
-        ...options.headers,
-      },
+      headers,
     });
 
     if (!response.ok) {
