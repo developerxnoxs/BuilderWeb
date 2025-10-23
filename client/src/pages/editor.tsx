@@ -394,7 +394,7 @@ export default function Editor() {
                 <>
                   {/* File Tabs */}
                   <div className="border-b border-border bg-card/30">
-                    <ScrollArea orientation="horizontal">
+                    <ScrollArea className="w-full">
                       <div className="flex items-center gap-px p-1">
                         {openFiles.map((file) => (
                           <button

@@ -14,6 +14,7 @@ import Templates from "@/pages/templates";
 import Builds from "@/pages/builds";
 import Settings from "@/pages/settings";
 import Editor from "@/pages/editor";
+import GitHubImport from "@/pages/github-import";
 
 function Router() {
   return (
@@ -24,6 +25,7 @@ function Router() {
       <Route path="/builds" component={Builds} />
       <Route path="/settings" component={Settings} />
       <Route path="/editor/:id" component={Editor} />
+      <Route path="/github-import" component={GitHubImport} />
       <Route component={NotFound} />
     </Switch>
   );
