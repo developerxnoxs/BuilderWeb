@@ -21,7 +21,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Hammer,
-  GitBranch
+  GitBranch,
+  Smartphone
 } from "lucide-react";
 import { Project, FileTreeNode, BuildJob } from "@shared/schema";
 import { useToast } from "@/hooks/use-toast";
@@ -50,7 +51,8 @@ export default function Editor() {
   const [activeTab, setActiveTab] = useState<string | null>(null);
   const [fileTreeCollapsed, setFileTreeCollapsed] = useState(false);
   const [buildPanelCollapsed, setBuildPanelCollapsed] = useState(false);
-  const [rightPanelTab, setRightPanelTab] = useState<"build" | "git">("build");
+  const [rightPanelTab, setRightPanelTab] = useState<"build" | "git" | "preview">("build");
+  const [showPreview, setShowPreview] = useState(false);
   const [newFileDialogOpen, setNewFileDialogOpen] = useState(false);
   const [newFolderDialogOpen, setNewFolderDialogOpen] = useState(false);
   const [newFileName, setNewFileName] = useState("");
@@ -340,6 +342,20 @@ export default function Editor() {
               </>
             )}
           </Button>
+          <Separator orientation="vertical" className="h-6" />
+          <Button
+            variant={showPreview ? "default" : "outline"}
+            size="sm"
+            onClick={() => {
+              setShowPreview(!showPreview);
+              setRightPanelTab("preview");
+              setBuildPanelCollapsed(false);
+            }}
+            data-testid="button-toggle-preview"
+          >
+            <Smartphone className="h-4 w-4 mr-2" />
+            Preview
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -452,7 +468,7 @@ export default function Editor() {
               <ResizableHandle />
               <ResizablePanel defaultSize={30} minSize={25} maxSize={40}>
                 <div className="h-full bg-card/30">
-                  <Tabs value={rightPanelTab} onValueChange={(v) => setRightPanelTab(v as "build" | "git")} className="h-full flex flex-col">
+                  <Tabs value={rightPanelTab} onValueChange={(v) => setRightPanelTab(v as "build" | "git" | "preview")} className="h-full flex flex-col">
                     <div className="border-b border-border px-2 py-1 bg-card/50">
                       <TabsList className="w-full justify-start">
                         <TabsTrigger value="build" className="flex items-center gap-2">
@@ -462,6 +478,10 @@ export default function Editor() {
                         <TabsTrigger value="git" className="flex items-center gap-2">
                           <GitBranch className="h-4 w-4" />
                           Git
+                        </TabsTrigger>
+                        <TabsTrigger value="preview" className="flex items-center gap-2">
+                          <Smartphone className="h-4 w-4" />
+                          Preview
                         </TabsTrigger>
                       </TabsList>
                     </div>
@@ -475,6 +495,42 @@ export default function Editor() {
                     
                     <TabsContent value="git" className="flex-1 p-4 m-0 overflow-auto">
                       {projectId && <GitPanel projectId={projectId} />}
+                    </TabsContent>
+
+                    <TabsContent value="preview" className="flex-1 p-4 m-0 overflow-auto flex items-center justify-center">
+                      <div className="relative">
+                        <div className="bg-gray-900 dark:bg-gray-800 rounded-[2.5rem] p-4 shadow-2xl border-8 border-gray-800 dark:border-gray-900">
+                          <div className="bg-background rounded-[1.5rem] overflow-hidden" style={{ width: '280px', height: '580px' }}>
+                            <div className="h-full flex items-center justify-center text-center p-8">
+                              <div className="space-y-4">
+                                <Smartphone className="h-16 w-16 mx-auto text-muted-foreground opacity-20" />
+                                <div>
+                                  <h3 className="font-semibold mb-2">Mobile Preview</h3>
+                                  <p className="text-sm text-muted-foreground mb-4">
+                                    Build your app to see the preview here
+                                  </p>
+                                  {currentBuild?.apkUrl && (
+                                    <div className="space-y-2">
+                                      <p className="text-xs text-muted-foreground">
+                                        Download the APK to test on your device
+                                      </p>
+                                      <Button
+                                        size="sm"
+                                        onClick={() => window.open(currentBuild.apkUrl!, "_blank")}
+                                        data-testid="button-download-apk-preview"
+                                      >
+                                        Download APK
+                                      </Button>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="absolute top-8 left-1/2 transform -translate-x-1/2 w-16 h-1 bg-gray-700 rounded-full"></div>
+                        <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2 w-12 h-12 rounded-full border-2 border-gray-700"></div>
+                      </div>
                     </TabsContent>
                   </Tabs>
                 </div>
