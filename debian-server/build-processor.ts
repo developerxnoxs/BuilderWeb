@@ -3,6 +3,7 @@ import fs from "fs/promises";
 import path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
+import { getOrCreateKeystore, signAPK } from "./keystore-generator";
 
 const execAsync = promisify(exec);
 
@@ -163,35 +164,56 @@ async function buildReactNative(buildId: string, buildDir: string) {
   addLog(buildId, "info", "Installing dependencies...");
   build.progress = 10;
   
-  await simulateCommand(buildId, "npm install", 3000);
+  await runCommand(buildId, buildDir, "npm install --legacy-peer-deps");
   
-  addLog(buildId, "info", "Configuring Android build...");
+  addLog(buildId, "info", "Initializing Android project...");
+  build.progress = 20;
+  
+  const androidDir = path.join(buildDir, "android");
+  const assetsDir = path.join(androidDir, "app/src/main/assets");
+  await fs.mkdir(assetsDir, { recursive: true });
+  
+  addLog(buildId, "info", "Bundling JavaScript...");
   build.progress = 30;
   
-  await simulateCommand(buildId, "react-native bundle", 2000);
+  await runCommand(
+    buildId,
+    buildDir,
+    `npx react-native bundle --platform android --dev false --entry-file index.js --bundle-output ${assetsDir}/index.android.bundle --assets-dest ${androidDir}/app/src/main/res/`
+  );
   
-  addLog(buildId, "info", "Compiling Java sources...");
+  addLog(buildId, "info", "Building Android APK...");
   build.progress = 50;
   
-  await simulateCommand(buildId, "gradlew assembleRelease", 5000);
+  await runCommand(buildId, androidDir, "chmod +x gradlew");
   
-  addLog(buildId, "info", "Processing resources...");
-  build.progress = 70;
+  addLog(buildId, "info", "Compiling with Gradle (this may take a while)...");
+  build.progress = 60;
   
-  await simulateCommand(buildId, "aapt package", 2000);
+  await runCommand(buildId, androidDir, "./gradlew assembleRelease", 600000);
   
-  addLog(buildId, "info", "Generating APK...");
+  addLog(buildId, "info", "Locating generated APK...");
+  build.progress = 85;
+  
+  const apkSourcePath = path.join(androidDir, "app/build/outputs/apk/release/app-release.apk");
+  const tempApkPath = path.join(APKS_DIR, `temp-rn-${buildId}.apk`);
+  
+  await fs.copyFile(apkSourcePath, tempApkPath);
+  
+  addLog(buildId, "info", "Signing APK...");
   build.progress = 90;
   
+  const keystoreConfig = await getOrCreateKeystore(build.projectId);
+  const signedApkPath = await signAPK(tempApkPath, keystoreConfig);
+  
   const apkName = `${build.projectName.replace(/\s+/g, '-')}-${buildId}.apk`;
-  const apkPath = path.join(APKS_DIR, apkName);
+  const finalApkPath = path.join(APKS_DIR, apkName);
+  await fs.rename(signedApkPath, finalApkPath);
   
-  await createMockAPK(apkPath, build.projectName);
-  
-  build.apkPath = path.relative(process.cwd(), apkPath);
+  build.apkPath = path.relative(process.cwd(), finalApkPath);
   build.apkUrl = `/api/builds/${buildId}/download`;
   
-  addLog(buildId, "info", `APK generated: ${apkName}`);
+  addLog(buildId, "success", `APK generated and signed successfully: ${apkName}`);
 }
 
 async function buildFlutter(buildId: string, buildDir: string) {
@@ -201,25 +223,35 @@ async function buildFlutter(buildId: string, buildDir: string) {
   addLog(buildId, "info", "Getting Flutter dependencies...");
   build.progress = 10;
   
-  await simulateCommand(buildId, "flutter pub get", 3000);
+  await runCommand(buildId, buildDir, "flutter pub get");
   
-  addLog(buildId, "info", "Building Flutter Android app...");
-  build.progress = 40;
+  addLog(buildId, "info", "Building Flutter Android app (this may take several minutes)...");
+  build.progress = 30;
   
-  await simulateCommand(buildId, "flutter build apk", 8000);
+  await runCommand(buildId, buildDir, "flutter build apk --release", 900000);
   
-  addLog(buildId, "info", "Optimizing APK...");
-  build.progress = 80;
+  addLog(buildId, "info", "Locating generated APK...");
+  build.progress = 85;
+  
+  const apkSourcePath = path.join(buildDir, "build/app/outputs/flutter-apk/app-release.apk");
+  const tempApkPath = path.join(APKS_DIR, `temp-flutter-${buildId}.apk`);
+  
+  await fs.copyFile(apkSourcePath, tempApkPath);
+  
+  addLog(buildId, "info", "Signing APK...");
+  build.progress = 90;
+  
+  const keystoreConfig = await getOrCreateKeystore(build.projectId);
+  const signedApkPath = await signAPK(tempApkPath, keystoreConfig);
   
   const apkName = `${build.projectName.replace(/\s+/g, '-')}-${buildId}.apk`;
-  const apkPath = path.join(APKS_DIR, apkName);
+  const finalApkPath = path.join(APKS_DIR, apkName);
+  await fs.rename(signedApkPath, finalApkPath);
   
-  await createMockAPK(apkPath, build.projectName);
-  
-  build.apkPath = path.relative(process.cwd(), apkPath);
+  build.apkPath = path.relative(process.cwd(), finalApkPath);
   build.apkUrl = `/api/builds/${buildId}/download`;
   
-  addLog(buildId, "info", `APK generated: ${apkName}`);
+  addLog(buildId, "success", `APK generated and signed successfully: ${apkName}`);
 }
 
 async function buildCapacitor(buildId: string, buildDir: string) {
@@ -229,47 +261,91 @@ async function buildCapacitor(buildId: string, buildDir: string) {
   addLog(buildId, "info", "Installing dependencies...");
   build.progress = 10;
   
-  await simulateCommand(buildId, "npm install", 3000);
+  await runCommand(buildId, buildDir, "npm install --legacy-peer-deps");
   
   addLog(buildId, "info", "Building web assets...");
-  build.progress = 30;
+  build.progress = 25;
   
-  await simulateCommand(buildId, "npm run build", 4000);
+  await runCommand(buildId, buildDir, "npm run build");
   
-  addLog(buildId, "info", "Syncing with Capacitor...");
-  build.progress = 50;
+  addLog(buildId, "info", "Syncing with Capacitor Android...");
+  build.progress = 40;
   
-  await simulateCommand(buildId, "npx cap sync android", 3000);
+  await runCommand(buildId, buildDir, "npx cap sync android");
   
-  addLog(buildId, "info", "Building Android app...");
-  build.progress = 70;
+  addLog(buildId, "info", "Building Android APK with Gradle...");
+  build.progress = 60;
   
-  await simulateCommand(buildId, "gradlew assembleRelease", 5000);
+  const androidDir = path.join(buildDir, "android");
+  await runCommand(buildId, androidDir, "chmod +x gradlew");
+  await runCommand(buildId, androidDir, "./gradlew assembleRelease", 600000);
+  
+  addLog(buildId, "info", "Locating generated APK...");
+  build.progress = 85;
+  
+  const apkSourcePath = path.join(androidDir, "app/build/outputs/apk/release/app-release.apk");
+  const tempApkPath = path.join(APKS_DIR, `temp-cap-${buildId}.apk`);
+  
+  await fs.copyFile(apkSourcePath, tempApkPath);
+  
+  addLog(buildId, "info", "Signing APK...");
+  build.progress = 90;
+  
+  const keystoreConfig = await getOrCreateKeystore(build.projectId);
+  const signedApkPath = await signAPK(tempApkPath, keystoreConfig);
   
   const apkName = `${build.projectName.replace(/\s+/g, '-')}-${buildId}.apk`;
-  const apkPath = path.join(APKS_DIR, apkName);
+  const finalApkPath = path.join(APKS_DIR, apkName);
+  await fs.rename(signedApkPath, finalApkPath);
   
-  await createMockAPK(apkPath, build.projectName);
-  
-  build.apkPath = path.relative(process.cwd(), apkPath);
+  build.apkPath = path.relative(process.cwd(), finalApkPath);
   build.apkUrl = `/api/builds/${buildId}/download`;
   
-  addLog(buildId, "info", `APK generated: ${apkName}`);
+  addLog(buildId, "success", `APK generated and signed successfully: ${apkName}`);
 }
 
-async function simulateCommand(buildId: string, command: string, duration: number) {
+async function runCommand(
+  buildId: string,
+  cwd: string,
+  command: string,
+  timeout: number = 300000
+) {
   addLog(buildId, "info", `Running: ${command}`);
   
-  await new Promise(resolve => setTimeout(resolve, duration));
-  
-  if (Math.random() < 0.05) {
-    throw new Error(`Command failed: ${command}`);
+  try {
+    const { stdout, stderr } = await execAsync(command, {
+      cwd,
+      timeout,
+      maxBuffer: 10 * 1024 * 1024,
+      env: {
+        ...process.env,
+        ANDROID_HOME: process.env.ANDROID_HOME || "/opt/android-sdk",
+        ANDROID_SDK_ROOT: process.env.ANDROID_SDK_ROOT || "/opt/android-sdk",
+        JAVA_HOME: process.env.JAVA_HOME || "/usr/lib/jvm/java-17-openjdk-amd64",
+        PATH: `${process.env.ANDROID_HOME || "/opt/android-sdk"}/cmdline-tools/latest/bin:${process.env.ANDROID_HOME || "/opt/android-sdk"}/platform-tools:${process.env.PATH}`,
+      },
+    });
+    
+    if (stdout) {
+      const lines = stdout.trim().split('\n');
+      lines.slice(0, 5).forEach(line => {
+        if (line.trim()) addLog(buildId, "info", line.trim());
+      });
+    }
+    
+    if (stderr && !stderr.includes('warning')) {
+      const lines = stderr.trim().split('\n');
+      lines.slice(0, 3).forEach(line => {
+        if (line.trim() && !line.toLowerCase().includes('deprecated')) {
+          addLog(buildId, "warn", line.trim());
+        }
+      });
+    }
+  } catch (error: any) {
+    if (error.stdout) addLog(buildId, "error", `stdout: ${error.stdout.substring(0, 500)}`);
+    if (error.stderr) addLog(buildId, "error", `stderr: ${error.stderr.substring(0, 500)}`);
+    throw new Error(error.message || "Command execution failed");
   }
-}
-
-async function createMockAPK(apkPath: string, projectName: string) {
-  const apkContent = Buffer.from(`Mock APK for ${projectName}\nGenerated at: ${new Date().toISOString()}`);
-  await fs.writeFile(apkPath, apkContent);
 }
 
 export async function getBuildStatus(buildId: string) {
