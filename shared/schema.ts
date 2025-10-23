@@ -10,6 +10,9 @@ export const projects = pgTable("projects", {
   framework: text("framework").notNull(), // 'react-native' | 'flutter' | 'capacitor'
   status: text("status").notNull().default("active"), // 'active' | 'building' | 'archived'
   settings: jsonb("settings"), // project-specific build settings
+  githubRepo: text("github_repo"), // GitHub repo full name (owner/repo)
+  githubBranch: text("github_branch"), // GitHub branch name
+  githubUrl: text("github_url"), // GitHub repo URL
   createdAt: timestamp("created_at").notNull().defaultNow(),
   lastModified: timestamp("last_modified").notNull().defaultNow(),
 });
@@ -143,4 +146,28 @@ export interface SearchResult {
   lineContent: string;
   matchStart: number;
   matchEnd: number;
+}
+
+export interface GitHubRepo {
+  id: number;
+  name: string;
+  full_name: string;
+  description: string;
+  html_url: string;
+  default_branch: string;
+  language: string;
+  updated_at: string;
+  private: boolean;
+}
+
+export interface GitHubFile {
+  path: string;
+  content: string;
+  type: string;
+}
+
+export interface GitHubAuth {
+  accessToken: string;
+  username: string;
+  avatarUrl?: string;
 }
